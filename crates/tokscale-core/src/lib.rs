@@ -1097,9 +1097,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Grok)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::grok::parse_grok_updates_file(path)
-            })
+            // Use a Grok-aware fingerprint: parse output depends on the sibling
+            // signals.json rollup, so that file must participate in the cache key
+            // or a late/updated rollup is ignored forever for cached sessions.
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_grok_path,
+                sessions::grok::parse_grok_updates_file,
+            )
         })
         .collect();
     for outcome in grok_outcomes {

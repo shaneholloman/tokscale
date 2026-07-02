@@ -276,7 +276,17 @@ fn append_signals_reconciliation(
         .filter(|model| !model.trim().is_empty())
         .or_else(|| metadata.model_id.clone())
         .unwrap_or_else(|| fallback_model.to_string());
-    let timestamp = file_modified_timestamp_ms(&signals_path).max(metadata.timestamp);
+    // Anchor the reconciliation delta to the last recorded update activity rather
+    // than signals.json's mtime. The mtime advances every time Grok rewrites the
+    // rollup for a live session, which would migrate this whole (potentially
+    // multi-million-token) extra to a new day on each rescan and retroactively
+    // shrink the prior day's total. The last update timestamp only moves when
+    // genuine new activity is recorded, so the delta stays put across rescans.
+    let timestamp = messages
+        .iter()
+        .map(|message| message.timestamp)
+        .max()
+        .unwrap_or(metadata.timestamp);
 
     let mut message = UnifiedMessage::new_with_dedup(
         CLIENT_ID,
@@ -649,6 +659,30 @@ mod tests {
                 .sum::<i64>(),
             3396968
         );
+    }
+
+    #[test]
+    fn signals_reconciliation_anchors_timestamp_to_last_update_not_file_mtime() {
+        // The signals.json is written "now" (mtime far in the future relative to
+        // the update timestamps). The reconciliation delta must be dated by the
+        // last recorded update (1700000001000), NOT the signals.json mtime, so a
+        // live session's extra does not migrate to a new day on every rescan.
+        let (_temp, path) = write_fixture(
+            r#"{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"user_message_chunk","_meta":{"modelId":"grok-build"}},"_meta":{"agentTimestampMs":1700000000000}}}
+{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk"},"_meta":{"totalTokens":171056,"agentTimestampMs":1700000001000}}}"#,
+            None,
+            Some(
+                r#"{"primaryModelId":"grok-build","totalTokensBeforeCompaction":3224659,"contextTokensUsed":172309}"#,
+            ),
+        );
+
+        let messages = parse_grok_updates_file(&path);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some("grok:session-1:signals")
+        );
+        assert_eq!(messages[1].timestamp, 1700000001000);
     }
 
     #[test]
